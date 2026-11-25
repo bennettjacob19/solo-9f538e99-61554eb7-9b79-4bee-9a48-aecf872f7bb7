@@ -101,7 +101,8 @@ def main() -> int:
 
         print("\n== 2. 开单：清退 demo，保留 data-a / data-b ==")
         t = c.post("/tickets", json={"namespace": "demo",
-                                     "retain_pvcs": ["data-a", "data-b"]})
+                                     "retain_pvcs": ["data-a", "data-b"],
+                                     "io_limit_bytes": 8 * 1024 * 1024})
         check("开单 -> 201", t.status_code == 201, t.text)
         tid = t.json()["ticket"]["id"]
         tk = t.json()["ticket"]
@@ -197,7 +198,8 @@ def main() -> int:
               and any(p["name"] == "data-x" for p in cl["pvcs"]))
 
         print("\n== 8. 新命名空间独立开单 + 命名空间删除丢包续办 ==")
-        t2 = c.post("/tickets", json={"namespace": "demo", "retain_pvcs": ["data-x"]})
+        t2 = c.post("/tickets", json={"namespace": "demo", "retain_pvcs": ["data-x"],
+                                      "io_limit_bytes": 8 * 1024 * 1024})
         check("第二张开单 -> 201", t2.status_code == 201, t2.text)
         tid2 = t2.json()["ticket"]["id"]
         check("第二单绑定新 UID", t2.json()["ticket"]["namespace_uid"] == ns_uid_v2)

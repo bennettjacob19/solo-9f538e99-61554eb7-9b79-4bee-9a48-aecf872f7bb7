@@ -16,7 +16,12 @@ CREATE TABLE IF NOT EXISTS tickets (
   baseline_bytes     INTEGER NOT NULL,
   max_selected_bytes INTEGER NOT NULL,
   peak_bytes         INTEGER NOT NULL DEFAULT 0,
-  done_at            TEXT
+  done_at            TEXT,
+  io_limit_bytes     INTEGER,
+  last_io_read       INTEGER NOT NULL DEFAULT 0,
+  last_io_written    INTEGER NOT NULL DEFAULT 0,
+  total_io_read      INTEGER NOT NULL DEFAULT 0,
+  total_io_written   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS pvcs (
   ticket_id      TEXT NOT NULL,
@@ -29,6 +34,9 @@ CREATE TABLE IF NOT EXISTS pvcs (
   sha256         TEXT NOT NULL,
   copy_state     TEXT NOT NULL DEFAULT 'pending',
   delete_state   TEXT NOT NULL DEFAULT 'pending',
+  copy_offset    INTEGER NOT NULL DEFAULT 0,
+  verify_offset  INTEGER NOT NULL DEFAULT 0,
+  verify_hash_state TEXT,
   PRIMARY KEY (ticket_id, uid)
 );
 CREATE TABLE IF NOT EXISTS ops (
@@ -44,6 +52,22 @@ CREATE TABLE IF NOT EXISTS ops (
 );
 """
 
+# 旧版本数据库（无分块 I/O 字段）的在线迁移：仅新增列，语义保持兼容。
+_MIGRATIONS = {
+    "tickets": [
+        ("io_limit_bytes", "INTEGER"),
+        ("last_io_read", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_io_written", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_io_read", "INTEGER NOT NULL DEFAULT 0"),
+        ("total_io_written", "INTEGER NOT NULL DEFAULT 0"),
+    ],
+    "pvcs": [
+        ("copy_offset", "INTEGER NOT NULL DEFAULT 0"),
+        ("verify_offset", "INTEGER NOT NULL DEFAULT 0"),
+        ("verify_hash_state", "TEXT"),
+    ],
+}
+
 
 class DB:
     """极简 SQLite 访问层：每次操作独立连接，WAL 模式，写操作加进程内锁。"""
@@ -54,9 +78,17 @@ class DB:
         conn = self._conn()
         try:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
             conn.commit()
         finally:
             conn.close()
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        for table, columns in _MIGRATIONS.items():
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, decl in columns:
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30)

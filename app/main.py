@@ -2,11 +2,13 @@
 
 演练面（/docs 可操作）：
   POST /tickets                       开单：指定待删除命名空间 + 至少一个需保留的 PVC
+                                      + 单次推进正文 I/O 上限（1~8 MiB）；开单不读卷正文
   GET  /tickets                       工单列表
-  GET  /tickets/{tid}                 进度、阻塞原因、存储水位
-  POST /tickets/{tid}/advance         推进清理（自动核对未明删除后继续）
-  GET  /tickets/{tid}/retained        留存副本清单
-  GET  /tickets/{tid}/retained/{pvc}  凭单号读回所选数据
+  GET  /tickets/{tid}                 进度、阻塞原因、存储水位、本次/累计实际读写量
+  POST /tickets/{tid}/advance         短请求推进：单次正文 I/O 不超过开单上限，
+                                      可凭原单反复续办（复制/校验崩溃后重启续办）
+  GET  /tickets/{tid}/retained        留存副本清单（含 verified 标记）
+  GET  /tickets/{tid}/retained/{pvc}  凭单号读回所选数据（仅校验通过后开放）
 
 模拟端管理面：
   POST /sim/seed    造一个命名空间和若干已停写绑定卷
@@ -43,9 +45,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="K8s 命名空间清退留存演练",
-    version="1.0.0",
-    description="清退测试命名空间时保留指定 PVC 数据：先独立读回校验留存副本，再按 PV 回收策略删除源卷；"
-                "支持删除丢包注入、SQLite 进度持久化、重启核对续办、按开单 UID 清理。",
+    version="1.1.0",
+    description="清退测试命名空间时保留指定 PVC 数据：短请求分块留存（单次正文 I/O 上限 1~8 MiB，"
+                "源卷读、留存写、独立读回、恢复核对均计入），独立读回校验与开单 SHA-256 一致后"
+                "才开放下载并删除源卷；支持删除丢包注入、SQLite 进度持久化、重启续办（每阶段最多"
+                "重做 256 KiB）、按开单 UID 清理。",
     lifespan=lifespan,
 )
 
@@ -68,9 +72,10 @@ def root():
 
 # ---------------- 演练面 ----------------
 @app.post("/tickets", status_code=201, tags=["tickets"],
-          summary="开单：指定待删除命名空间和至少一个需保留的 PVC")
+          summary="开单：命名空间 + 保留 PVC + 单次正文 I/O 上限（1~8 MiB），不读卷正文")
 def create_ticket(req: TicketRequest):
-    return _guard(engine.create_ticket, req.namespace, req.retain_pvcs, req.note)
+    return _guard(engine.create_ticket, req.namespace, req.retain_pvcs,
+                  req.io_limit_bytes, req.note)
 
 
 @app.get("/tickets", tags=["tickets"], summary="工单列表")
@@ -84,18 +89,18 @@ def get_ticket(tid: str):
 
 
 @app.post("/tickets/{tid}/advance", tags=["tickets"],
-          summary="推进清理（先核对未明删除，再续办后续步骤）")
+          summary="短请求推进：单次正文 I/O 不超过开单上限，预算用尽即返回、可续办")
 def advance_ticket(tid: str):
     return _guard(engine.advance, tid)
 
 
-@app.get("/tickets/{tid}/retained", tags=["tickets"], summary="留存副本清单")
+@app.get("/tickets/{tid}/retained", tags=["tickets"], summary="留存副本清单（含校验状态）")
 def list_retained(tid: str):
     return _guard(lambda: {"ticket_id": tid, "items": engine.retained_items(tid)})
 
 
 @app.get("/tickets/{tid}/retained/{pvc_name}", tags=["tickets"],
-         summary="凭单号读回所选 PVC 的数据")
+         summary="凭单号读回所选 PVC（仅独立读回校验通过后开放，否则 409）")
 def download_retained(tid: str, pvc_name: str):
     path = _guard(engine.retained_file, tid, pvc_name)
     return FileResponse(path, filename=f"{tid}-{pvc_name}.bin", media_type="application/octet-stream")
